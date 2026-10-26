@@ -39,8 +39,11 @@ object VoiceUiHooks {
     private var listening = false
 
     @Volatile private var isDoubaoSessionActive = false
+    @Volatile private var isDoubaoCommitted = false
     @Volatile private var isDoubaoCommitting = false
+    @Volatile private var blockNativeUntil = 0L // 拦截原生语音的截止时间（uptimeMillis）
     @Volatile private var lastComposedText = ""
+    @Volatile private var currentSessionId = 0
 
     @Volatile private var service: InputMethodService? = null
     @Volatile private var melt: KeyboardMeltView? = null
@@ -85,15 +88,20 @@ object VoiceUiHooks {
                         if (now != listening) {
                             listening = now
                             if (now) {
-                                onMain { meltDown() }
-                                startedBySpace = android.os.SystemClock.uptimeMillis() - spacePressedAt < 800L
-                                if (ConfigStore.voiceDoubaoEnabled) {
-                                    startDoubaoStream()
+                                startedBySpace =
+                                    android.os.SystemClock.uptimeMillis() - spacePressedAt < 800L
+                                onMain {
+                                    meltDown()
+                                    if (ConfigStore.voiceDoubaoEnabled) {
+                                        startDoubaoStream()
+                                    }
                                 }
                             } else {
-                                onMain { restore() }
-                                if (ConfigStore.voiceDoubaoEnabled) {
-                                    stopDoubaoStream()
+                                onMain {
+                                    restore()
+                                    if (ConfigStore.voiceDoubaoEnabled) {
+                                        stopDoubaoStream()
+                                    }
                                 }
                             }
                             XLog.i("聆听状态 -> $state（键盘${if (now) "融化" else "复原"}）")
@@ -117,7 +125,7 @@ object VoiceUiHooks {
                 if (m.parameterTypes.size != 1 || m.parameterTypes[0] != java.lang.Float.TYPE) continue
                 module.hook(m).intercept { chain ->
                     val r = chain.proceed()
-                    if (listening) {
+                    if (listening && !ConfigStore.voiceDoubaoEnabled) {
                         val rms = (chain.getArg(0) as? Float)?.toInt()
                         if (rms != null) {
                             melt?.setLevel(rms)
@@ -237,14 +245,19 @@ object VoiceUiHooks {
                 android.view.MotionEvent::class.java
             )
             module.hook(dispatchTouchEvent).intercept { chain ->
-                if (!listening) {
-                    return@intercept chain.proceed()
-                }
                 if (chain.thisObject === inputView) {
                     val ev = chain.getArg(0) as? android.view.MotionEvent
                     if (ev != null) {
                         val a = ev.actionMasked
-                        if ((a == android.view.MotionEvent.ACTION_UP || a == android.view.MotionEvent.ACTION_CANCEL) &&
+                        if (!listening && a == android.view.MotionEvent.ACTION_DOWN) {
+                            // 触屏按键：放行物理输入，并立即封口上一句在途语音
+                            blockNativeUntil = 0L
+                            if (isDoubaoSessionActive && !isDoubaoCommitted) {
+                                commitFinalText(currentSessionId, lastComposedText)
+                            }
+                        } else if (listening &&
+                            (a == android.view.MotionEvent.ACTION_UP ||
+                                a == android.view.MotionEvent.ACTION_CANCEL) &&
                             startedBySpace
                         ) {
                             startedBySpace = false
@@ -423,77 +436,95 @@ object VoiceUiHooks {
             return
         }
 
+        // 若上一句仍在尾包收敛期，立刻封口固化，避免与新会话串扰
+        if (isDoubaoSessionActive && !isDoubaoCommitted && lastComposedText.isNotBlank()) {
+            commitFinalText(currentSessionId, lastComposedText)
+        }
+
+        val mySessionId = ++currentSessionId
         isDoubaoSessionActive = true
+        isDoubaoCommitted = false
+        blockNativeUntil = Long.MAX_VALUE
         lastComposedText = ""
 
-        DoubaoStreamVoiceEngine.start(apiKey, appId, cluster, object : DoubaoStreamVoiceEngine.StreamCallback {
-            override fun onListeningStarted() {
-                XLog.i("DoubaoStreamVoice: 开始聆听推流")
-            }
-
-            override fun onVolumeChanged(rmsDb: Float) {
-                if (listening) {
-                    melt?.setLevel(rmsDb.toInt())
+        DoubaoStreamVoiceEngine.start(
+            apiKey = apiKey,
+            appId = appId,
+            cluster = cluster,
+            callback = object : DoubaoStreamVoiceEngine.StreamCallback {
+                override fun onListeningStarted() {
+                    XLog.i("DoubaoStreamVoice: 开始聆听推流 (sid=$mySessionId)")
                 }
-            }
 
-            override fun onPartialText(partialText: String) {
-                if (!isDoubaoSessionActive) return
-                lastComposedText = partialText
-                val ic = service?.currentInputConnection ?: return
-                isDoubaoCommitting = true
-                try {
-                    ic.setComposingText(partialText, 1)
-                } finally {
-                    isDoubaoCommitting = false
+                override fun onVolumeChanged(rmsDb: Float) {
+                    if (listening && currentSessionId == mySessionId) {
+                        melt?.setLevel(rmsDb.toInt())
+                    }
                 }
-            }
 
-            override fun onFinalText(finalText: String) {
-                commitFinalText(finalText)
-            }
-
-            override fun onError(errorMsg: String) {
-                XLog.e("DoubaoStreamVoice 报错: $errorMsg", null)
-                val ic = service?.currentInputConnection
-                if (lastComposedText.isNotEmpty()) {
+                override fun onPartialText(partialText: String) {
+                    if (currentSessionId != mySessionId || !isDoubaoSessionActive || isDoubaoCommitted) return
+                    if (partialText == lastComposedText) return
+                    lastComposedText = partialText
+                    val ic = service?.currentInputConnection ?: return
                     isDoubaoCommitting = true
                     try {
-                        ic?.finishComposingText()
+                        ic.setComposingText(partialText, 1)
                     } finally {
                         isDoubaoCommitting = false
                     }
                 }
-                isDoubaoSessionActive = false
+
+                override fun onFinalText(finalText: String) {
+                    onMain { commitFinalText(mySessionId, finalText) }
+                }
+
+                override fun onError(errorMsg: String) {
+                    XLog.e("DoubaoStreamVoice 报错: $errorMsg", null)
+                    onMain { commitFinalText(mySessionId, lastComposedText) }
+                }
             }
-        })
+        )
     }
 
     private fun stopDoubaoStream() {
-        if (!isDoubaoSessionActive) return
+        val sid = currentSessionId
+        if (!isDoubaoSessionActive || isDoubaoCommitted) return
+        // 松手后预留 1500ms 拦截窗口，触屏按键打字时会被 ACTION_DOWN 立即重置
+        blockNativeUntil = android.os.SystemClock.uptimeMillis() + 1500L
         DoubaoStreamVoiceEngine.stop { finalResult ->
-            commitFinalText(finalResult)
+            onMain { commitFinalText(sid, finalResult) }
         }
     }
 
-    private fun commitFinalText(text: String) {
+    private fun commitFinalText(sessionId: Int, text: String) {
+        if (sessionId != currentSessionId || isDoubaoCommitted) return
+        isDoubaoCommitted = true
+        isDoubaoSessionActive = false
+        blockNativeUntil = android.os.SystemClock.uptimeMillis() + 1500L
+
         val ic = service?.currentInputConnection
         val commitContent = text.ifBlank { lastComposedText }
-        if (ic != null && commitContent.isNotBlank()) {
+        lastComposedText = ""
+        if (ic != null) {
             isDoubaoCommitting = true
             try {
-                ic.setComposingText(commitContent, 1)
-                ic.finishComposingText()
-                XLog.i("DoubaoStreamVoice: 最终上屏 -> $commitContent")
+                if (commitContent.isNotBlank()) {
+                    ic.setComposingText(commitContent, 1)
+                    ic.finishComposingText()
+                    XLog.i("DoubaoStreamVoice: 最终上屏 -> $commitContent (sid=$sessionId)")
+                } else {
+                    ic.finishComposingText()
+                }
             } finally {
                 isDoubaoCommitting = false
             }
-        } else {
-            ic?.finishComposingText()
         }
-        mainHandler.postDelayed({
-            isDoubaoSessionActive = false
-        }, 300)
+    }
+
+    private fun shouldBlockNativeInput(): Boolean {
+        if (isDoubaoCommitting) return false
+        return isDoubaoSessionActive || android.os.SystemClock.uptimeMillis() < blockNativeUntil
     }
 
     private fun hookInputConnection(module: XposedModule, classLoader: ClassLoader) {
@@ -501,7 +532,7 @@ object VoiceUiHooks {
         Reflect.method(icCls, "commitText", CharSequence::class.java, java.lang.Integer.TYPE)?.let { m ->
             XLog.safe("VoiceUiHooks.blockNativeCommit") {
                 module.hook(m).intercept { chain ->
-                    if (isDoubaoSessionActive && !isDoubaoCommitting) {
+                    if (shouldBlockNativeInput()) {
                         XLog.i("VoiceUiHooks: 拦截原生语音冲突 commitText -> ${chain.getArg(0)}")
                         return@intercept true
                     }
@@ -512,7 +543,7 @@ object VoiceUiHooks {
         Reflect.method(icCls, "setComposingText", CharSequence::class.java, java.lang.Integer.TYPE)?.let { m ->
             XLog.safe("VoiceUiHooks.blockNativeComposing") {
                 module.hook(m).intercept { chain ->
-                    if (isDoubaoSessionActive && !isDoubaoCommitting) {
+                    if (shouldBlockNativeInput()) {
                         return@intercept true
                     }
                     chain.proceed()

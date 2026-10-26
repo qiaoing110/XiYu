@@ -35,8 +35,11 @@ object DoubaoStreamVoiceEngine {
 
     private const val WS_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
     private const val SAMPLE_RATE = 16000
-    private const val FRAME_MS = 100
+    // 50ms 分帧（1600 字节）
+    private const val FRAME_MS = 50
     private const val FRAME_BYTES = SAMPLE_RATE * 2 * FRAME_MS / 1000
+    private const val MAX_PRE_CONNECT_FRAMES = 60 // 握手前最多暂存 3s 音频
+    private const val TAIL_WAIT_TIMEOUT_MS = 280L // 松手等待尾包的最大收敛时间
 
     private const val PROTOCOL_VERSION = 1
     private const val DEFAULT_HEADER_SIZE = 1
@@ -49,7 +52,8 @@ object DoubaoStreamVoiceEngine {
 
     private const val FLAG_NO_SEQUENCE = 0b0000
     private const val FLAG_POS_SEQUENCE = 0b0001
-    private const val FLAG_NEG_SEQUENCE = 0b0010
+    // 负序号尾包（含 sequence 且 sequence 为负）
+    private const val FLAG_NEG_SEQUENCE = 0b0011
 
     private const val SERIAL_NONE = 0
     private const val SERIAL_JSON = 1
@@ -58,10 +62,21 @@ object DoubaoStreamVoiceEngine {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val isRecording = AtomicBoolean(false)
     private val sequenceCounter = AtomicInteger(1)
+    private val sessionGenerator = AtomicInteger(0)
 
-    @Volatile private var currentWebSocket: WebSocket? = null
-    @Volatile private var currentAudioRecord: AudioRecord? = null
-    @Volatile private var lastRecognizedText: String = ""
+    @Volatile
+    private var activeSessionId: Int = 0
+
+    @Volatile
+    private var currentWebSocket: WebSocket? = null
+
+    @Volatile
+    private var lastRecognizedText: String = ""
+
+    @Volatile
+    private var pendingStopCallback: ((String) -> Unit)? = null
+
+    private val stopDelivered = AtomicBoolean(false)
 
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(4, TimeUnit.SECONDS)
@@ -88,10 +103,16 @@ object DoubaoStreamVoiceEngine {
             postError(callback, "请先在汐语设置中填写豆包 API Key")
             return
         }
+        // 若上一轮仍在等待尾包，立即触发其完成回调并清理旧连接
+        flushPendingStop()
         if (isRecording.getAndSet(true)) return
 
+        val mySessionId = sessionGenerator.incrementAndGet()
+        activeSessionId = mySessionId
         lastRecognizedText = ""
         sequenceCounter.set(1)
+        stopDelivered.set(false)
+        pendingStopCallback = null
 
         thread(name = "xy-doubao-worker") {
             val minBufSize = AudioRecord.getMinBufferSize(
@@ -107,43 +128,61 @@ object DoubaoStreamVoiceEngine {
 
             val recorder = runCatching {
                 AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    MediaRecorder.AudioSource.MIC,
                     SAMPLE_RATE,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
-                    maxOf(minBufSize * 2, FRAME_BYTES * 8)
+                    maxOf(minBufSize * 2, FRAME_BYTES * 4)
                 )
             }.getOrNull()
 
             if (recorder == null || recorder.state != AudioRecord.STATE_INITIALIZED) {
-                recorder?.release()
+                runCatching { recorder?.release() }
                 isRecording.set(false)
                 postError(callback, "麦克风初始化失败，请检查录音权限")
                 return@thread
             }
 
-            currentAudioRecord = recorder
             try {
                 recorder.startRecording()
-            } catch (e: Exception) {
-                recorder.release()
-                currentAudioRecord = null
+            } catch (e: Throwable) {
+                runCatching { recorder.release() }
                 isRecording.set(false)
-                postError(callback, "启动录音失败: ${e.message}")
+                postError(callback, "无法启动麦克风录音: ${e.message}")
                 return@thread
             }
 
-            mainHandler.post { callback.onListeningStarted() }
+            mainHandler.post {
+                if (activeSessionId == mySessionId) callback.onListeningStarted()
+            }
 
             val preConnectQueue = ConcurrentLinkedQueue<ByteArray>()
             val activeSocket = AtomicReference<WebSocket?>(null)
             val isHandshakeDone = AtomicBoolean(false)
 
+            fun drainPreConnectQueue(ws: WebSocket) {
+                while (true) {
+                    val chunk = preConnectQueue.poll() ?: break
+                    val seq = sequenceCounter.getAndIncrement()
+                    val packet = packBinaryPacket(
+                        messageType = MSG_AUDIO_ONLY_REQUEST,
+                        flags = FLAG_POS_SEQUENCE,
+                        sequence = seq,
+                        payload = gzipCompress(chunk)
+                    )
+                    ws.send(packet.toByteString())
+                }
+            }
+
             val reqId = UUID.randomUUID().toString()
             val request = buildWebSocketRequest(apiKey, appId, cluster, reqId)
 
-            currentWebSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
+            val wsInstance = okHttpClient.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    if (activeSessionId != mySessionId) {
+                        runCatching { webSocket.close(1000, "Stale") }
+                        return
+                    }
                     activeSocket.set(webSocket)
                     val initPayload = createInitPayloadJson()
                     val initPacket = packBinaryPacket(
@@ -153,112 +192,137 @@ object DoubaoStreamVoiceEngine {
                         payload = gzipCompress(initPayload.toByteArray(Charsets.UTF_8))
                     )
                     webSocket.send(initPacket.toByteString())
-
-                    while (true) {
-                        val chunk = preConnectQueue.poll() ?: break
-                        val seq = sequenceCounter.getAndIncrement()
-                        val packet = packBinaryPacket(
-                            messageType = MSG_AUDIO_ONLY_REQUEST,
-                            flags = FLAG_POS_SEQUENCE,
-                            sequence = seq,
-                            payload = gzipCompress(chunk)
-                        )
-                        webSocket.send(packet.toByteString())
-                    }
+                    drainPreConnectQueue(webSocket)
                     isHandshakeDone.set(true)
+                    drainPreConnectQueue(webSocket) // 二次排空，消除 isHandshakeDone 置位瞬间的竞态丢帧
                 }
 
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                    if (currentWebSocket !== webSocket) return
-                    parseServerResponse(bytes.toByteArray(), callback)
+                    if (activeSessionId != mySessionId) return
+                    parseServerResponse(mySessionId, bytes.toByteArray(), callback)
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    XLog.e("DoubaoStreamVoice: 连接异常: ${t.message}", t)
-                    val code = response?.code
-                    val err = when (code) {
-                        401, 403 -> "鉴权失败 ($code)，请检查 API Key"
-                        404 -> "资源 ID 不存在 ($code)，请检查 Cluster"
-                        else -> "网络连接异常: ${t.message ?: "超时"}"
+                    if (activeSessionId != mySessionId) return
+                    XLog.e("DoubaoStreamVoice: WebSocket 异常", t)
+                    isRecording.set(false)
+                    if (!deliverStopIfPending(mySessionId, lastRecognizedText)) {
+                        postError(callback, "语音网络连接中断: ${t.message ?: "未知错误"}")
                     }
-                    postError(callback, err)
-                    stop()
                 }
             })
+            currentWebSocket = wsInstance
 
             val buffer = ByteArray(FRAME_BYTES)
-            while (isRecording.get()) {
-                val read = recorder.read(buffer, 0, FRAME_BYTES)
-                if (read <= 0) break
-                val chunk = if (read == FRAME_BYTES) buffer.clone() else buffer.copyOf(read)
-                val rms = calculateRms(chunk)
-                mainHandler.post { callback.onVolumeChanged(rms.toFloat()) }
+            try {
+                while (isRecording.get() && activeSessionId == mySessionId) {
+                    val read = recorder.read(buffer, 0, FRAME_BYTES)
+                    if (read > 0) {
+                        val chunk = if (read == FRAME_BYTES) buffer.clone() else buffer.copyOf(read)
+                        val rms = calculateRms(chunk)
+                        mainHandler.post {
+                            if (activeSessionId == mySessionId && isRecording.get()) {
+                                callback.onVolumeChanged(rms.toFloat())
+                            }
+                        }
 
-                val ws = activeSocket.get()
-                if (ws != null && isHandshakeDone.get()) {
-                    val seq = sequenceCounter.getAndIncrement()
-                    val packet = packBinaryPacket(
-                        messageType = MSG_AUDIO_ONLY_REQUEST,
-                        flags = FLAG_POS_SEQUENCE,
-                        sequence = seq,
-                        payload = gzipCompress(chunk)
-                    )
-                    ws.send(packet.toByteString())
-                } else if (preConnectQueue.size < 20) {
-                    preConnectQueue.offer(chunk)
+                        val ws = activeSocket.get()
+                        if (ws != null && isHandshakeDone.get()) {
+                            drainPreConnectQueue(ws)
+                            val seq = sequenceCounter.getAndIncrement()
+                            val packet = packBinaryPacket(
+                                messageType = MSG_AUDIO_ONLY_REQUEST,
+                                flags = FLAG_POS_SEQUENCE,
+                                sequence = seq,
+                                payload = gzipCompress(chunk)
+                            )
+                            ws.send(packet.toByteString())
+                        } else {
+                            if (preConnectQueue.size >= MAX_PRE_CONNECT_FRAMES) {
+                                preConnectQueue.poll()
+                            }
+                            preConnectQueue.offer(chunk)
+                        }
+                    }
+                }
+            } finally {
+                // 在工作线程内安全停止并释放 AudioRecord，彻底避免跨线程并发 release 崩溃
+                runCatching { recorder.stop() }
+                runCatching { recorder.release() }
+            }
+
+            // 录音循环退出后，按严格顺序发送负序号尾包
+            if (activeSessionId == mySessionId) {
+                val ws = activeSocket.get() ?: currentWebSocket
+                if (ws != null) {
+                    runCatching {
+                        if (isHandshakeDone.get()) drainPreConnectQueue(ws)
+                        val seq = -sequenceCounter.getAndIncrement()
+                        val endPacket = packBinaryPacket(
+                            messageType = MSG_AUDIO_ONLY_REQUEST,
+                            flags = FLAG_NEG_SEQUENCE,
+                            sequence = seq,
+                            payload = gzipCompress(ByteArray(0))
+                        )
+                        ws.send(endPacket.toByteString())
+                    }
                 }
             }
         }
     }
 
-    /** 停止录音并立即交付当前文字，异步发送尾包并安全回收 */
+    /**
+     * 停止推流并等待服务端尾包完成固化（最多等待 280ms）
+     */
     fun stop(onCompleted: ((String) -> Unit)? = null) {
-        if (!isRecording.getAndSet(false)) return
-
-        val recorder = currentAudioRecord
-        currentAudioRecord = null
-        runCatching {
-            recorder?.stop()
-            recorder?.release()
+        val stoppingSessionId = activeSessionId
+        if (!isRecording.getAndSet(false)) {
+            onCompleted?.invoke(lastRecognizedText)
+            return
         }
 
-        val immediateText = lastRecognizedText
-        onCompleted?.invoke(immediateText)
+        pendingStopCallback = onCompleted
 
+        // 超时兜底：若服务端在 280ms 内未返回尾包，使用已有最新文本固化
+        mainHandler.postDelayed({
+            deliverStopIfPending(stoppingSessionId, lastRecognizedText)
+        }, TAIL_WAIT_TIMEOUT_MS)
+    }
+
+    private fun deliverStopIfPending(sessionId: Int, finalText: String): Boolean {
+        if (sessionId != activeSessionId) return false
+        if (!stopDelivered.compareAndSet(false, true)) return false
+
+        val cb = pendingStopCallback
+        pendingStopCallback = null
         val ws = currentWebSocket
-        if (ws != null) {
-            val seq = -sequenceCounter.getAndIncrement()
-            val endPacket = packBinaryPacket(
-                messageType = MSG_AUDIO_ONLY_REQUEST,
-                flags = FLAG_NEG_SEQUENCE,
-                sequence = seq,
-                payload = gzipCompress(ByteArray(0))
-            )
-            runCatching { ws.send(endPacket.toByteString()) }
+        currentWebSocket = null
 
-            mainHandler.postDelayed({
-                runCatching { ws.close(1000, "Done") }
-                if (currentWebSocket === ws) currentWebSocket = null
-            }, 300)
+        mainHandler.post {
+            cb?.invoke(finalText)
+        }
+        runCatching { ws?.close(1000, "Done") }
+        return true
+    }
+
+    private fun flushPendingStop() {
+        val sessionId = activeSessionId
+        if (pendingStopCallback != null) {
+            deliverStopIfPending(sessionId, lastRecognizedText)
         }
     }
 
     /** 取消当前录音与识别 */
     fun cancel() {
+        activeSessionId = sessionGenerator.incrementAndGet()
         isRecording.set(false)
-        val recorder = currentAudioRecord
-        currentAudioRecord = null
-        runCatching {
-            recorder?.stop()
-            recorder?.release()
-        }
-        val ws = currentWebSocket
+        pendingStopCallback = null
+        stopDelivered.set(true)
+        runCatching { currentWebSocket?.close(1000, "cancel") }
         currentWebSocket = null
-        runCatching { ws?.cancel() }
         lastRecognizedText = ""
     }
 
-    /** 测试接口连通性与凭证有效性 */
     fun testConnection(
         apiKey: String,
         appId: String = "",
@@ -266,77 +330,129 @@ object DoubaoStreamVoiceEngine {
         onResult: (Boolean, String) -> Unit
     ) {
         if (apiKey.isBlank()) {
-            onResult(false, "API Key 不能为空")
+            mainHandler.post { onResult(false, "API Key 不能为空") }
+            return
+        }
+        val reqId = UUID.randomUUID().toString()
+        val request = buildWebSocketRequest(apiKey, appId, cluster, reqId)
+        val finished = AtomicBoolean(false)
+
+        fun notifyOnce(ok: Boolean, msg: String) {
+            if (finished.compareAndSet(false, true)) {
+                mainHandler.post { onResult(ok, msg) }
+            }
+        }
+
+        okHttpClient.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                val initPayload = createInitPayloadJson()
+                val initPacket = packBinaryPacket(
+                    messageType = MSG_FULL_CLIENT_REQUEST,
+                    flags = FLAG_POS_SEQUENCE,
+                    sequence = 1,
+                    payload = gzipCompress(initPayload.toByteArray(Charsets.UTF_8))
+                )
+                webSocket.send(initPacket.toByteString())
+            }
+
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                val data = bytes.toByteArray()
+                if (data.size >= 2) {
+                    val msgType = (data[1].toInt() shr 4) and 0x0F
+                    if (msgType == MSG_ERROR_SERVER_RESPONSE) {
+                        val (errCode, errMsg) = parseErrorResponse(data)
+                        notifyOnce(false, "鉴权或配置错误 ($errCode): $errMsg")
+                        runCatching { webSocket.close(1000, "test end") }
+                        return
+                    }
+                    if (msgType == MSG_FULL_SERVER_RESPONSE || msgType == MSG_SERVER_ACK) {
+                        val (code, _) = extractResponseJson(data) ?: Pair(1000, "")
+                        if (code == 1000 || code == 20000000 || code == 0) {
+                            notifyOnce(true, "连接成功！豆包流式大模型可用")
+                        } else {
+                            notifyOnce(false, "服务返回异常状态码: $code")
+                        }
+                        runCatching { webSocket.close(1000, "test ok") }
+                    }
+                }
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                val code = response?.code
+                val msg = when (code) {
+                    401 -> "鉴权失败 (401)：API Key 无效"
+                    403 -> "无权限 (403)：请确认已开通豆包流式识别服务"
+                    400 -> "请求参数错误 (400)"
+                    429 -> "请求过于频繁 (429)"
+                    500 -> "服务端内部错误 (500)"
+                    else -> "连接失败: ${t.message ?: "网络不可达"}"
+                }
+                notifyOnce(false, msg)
+            }
+        })
+    }
+
+    private fun parseServerResponse(sessionId: Int, data: ByteArray, callback: StreamCallback) {
+        if (sessionId != activeSessionId) return
+        var isFinalPacket = false
+        if (data.size >= 2) {
+            val msgType = (data[1].toInt() shr 4) and 0x0F
+            val flags = data[1].toInt() and 0x0F
+            isFinalPacket = (flags and 0x02) != 0
+            if (msgType == MSG_SERVER_ACK) return
+            if (msgType == MSG_ERROR_SERVER_RESPONSE) {
+                val (errCode, errMsg) = parseErrorResponse(data)
+                XLog.e("DoubaoStreamVoice: 服务端错误 code=$errCode msg=$errMsg", null)
+                if (!deliverStopIfPending(sessionId, lastRecognizedText)) {
+                    postError(callback, "识别服务报错 ($errCode): $errMsg")
+                }
+                return
+            }
+        }
+
+        val (code, jsonStr) = extractResponseJson(data) ?: return
+        if (code != 1000 && code != 20000000 && code != 0) {
+            XLog.e("DoubaoStreamVoice: 错误码 code=$code raw=$jsonStr", null)
+            if (!deliverStopIfPending(sessionId, lastRecognizedText)) {
+                postError(callback, "识别服务提示错误 ($code)")
+            }
             return
         }
 
-        val reqId = UUID.randomUUID().toString()
-        val request = buildWebSocketRequest(apiKey, appId, cluster, reqId)
-
-        thread(name = "xy-doubao-test") {
-            var finished = false
-            val ws = okHttpClient.newWebSocket(request, object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    val initPayload = createInitPayloadJson()
-                    val initPacket = packBinaryPacket(
-                        messageType = MSG_FULL_CLIENT_REQUEST,
-                        flags = FLAG_POS_SEQUENCE,
-                        sequence = 1,
-                        payload = gzipCompress(initPayload.toByteArray(Charsets.UTF_8))
-                    )
-                    webSocket.send(initPacket.toByteString())
+        runCatching {
+            val root = JSONObject(jsonStr)
+            val resultObj = root.optJSONObject("result")
+            val text = if (resultObj != null) {
+                resultObj.optString("text").orEmpty()
+            } else {
+                val arr = root.optJSONArray("result")
+                if (arr != null && arr.length() > 0) {
+                    arr.optJSONObject(0)?.optString("text").orEmpty()
+                } else {
+                    root.optString("text").orEmpty()
                 }
-
-                override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                    if (finished) return
-                    finished = true
-                    val data = bytes.toByteArray()
-                    if (data.size >= 2) {
-                        val msgType = (data[1].toInt() shr 4) and 0x0F
-                        if (msgType == MSG_ERROR_SERVER_RESPONSE) {
-                            val (errCode, errMsg) = parseErrorResponse(data)
-                            mainHandler.post { onResult(false, "服务端报错 ($errCode): $errMsg") }
-                            webSocket.close(1000, "Done")
-                            return
-                        }
-                        if (msgType == MSG_SERVER_ACK || msgType == MSG_FULL_SERVER_RESPONSE) {
-                            mainHandler.post { onResult(true, "连接成功！豆包流式服务已就绪") }
-                            webSocket.close(1000, "Done")
-                            return
+            }
+            if (text.isNotBlank()) {
+                lastRecognizedText = text
+            }
+            if (isFinalPacket || !isRecording.get()) {
+                // 已处于松手收尾阶段或收到服务端最终尾包：直接完成唯一一次最终固化
+                if (!deliverStopIfPending(sessionId, lastRecognizedText) && text.isNotBlank()) {
+                    mainHandler.post {
+                        if (sessionId == activeSessionId && !stopDelivered.get()) {
+                            callback.onPartialText(text)
                         }
                     }
-
-                    val resp = extractResponseJson(data)
-                    val code = resp?.first ?: -1
-                    if (code == 1000 || code == 20000000) {
-                        mainHandler.post { onResult(true, "连接成功！豆包流式服务已就绪") }
-                    } else {
-                        val (errCode, errMsg) = parseErrorResponse(data)
-                        mainHandler.post { onResult(false, "握手响应失败 ($errCode): $errMsg") }
+                }
+            } else if (text.isNotBlank()) {
+                mainHandler.post {
+                    if (sessionId == activeSessionId && isRecording.get() && !stopDelivered.get()) {
+                        callback.onPartialText(text)
                     }
-                    webSocket.close(1000, "Done")
                 }
-
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    if (finished) return
-                    finished = true
-                    val code = response?.code
-                    val msg = when (code) {
-                        401, 403 -> "鉴权失败 ($code)，请检查 API Key"
-                        404 -> "资源 ID 不存在 ($code)，请检查 Cluster"
-                        else -> "网络连接失败: ${t.message ?: "超时"}"
-                    }
-                    mainHandler.post { onResult(false, msg) }
-                }
-            })
-
-            mainHandler.postDelayed({
-                if (!finished) {
-                    finished = true
-                    runCatching { ws.cancel() }
-                    onResult(false, "连接超时，请检查网络环境")
-                }
-            }, 6000)
+            }
+        }.onFailure { e ->
+            XLog.e("DoubaoStreamVoice: 解析响应 JSON 失败", e)
         }
     }
 
@@ -362,39 +478,7 @@ object DoubaoStreamVoiceEngine {
         return builder.build()
     }
 
-    private fun parseServerResponse(data: ByteArray, callback: StreamCallback) {
-        if (data.size >= 2) {
-            val msgType = (data[1].toInt() shr 4) and 0x0F
-            if (msgType == MSG_SERVER_ACK) return
-            if (msgType == MSG_ERROR_SERVER_RESPONSE) {
-                val (errCode, errMsg) = parseErrorResponse(data)
-                XLog.e("DoubaoStreamVoice: 服务端报错 code=$errCode msg=$errMsg", null)
-                postError(callback, "识别服务报错 ($errCode): $errMsg")
-                return
-            }
-        }
-
-        val (code, jsonStr) = extractResponseJson(data) ?: return
-        if (code != 1000 && code != 20000000) {
-            XLog.e("DoubaoStreamVoice: 错误码 code=$code raw=$jsonStr", null)
-            postError(callback, "识别服务提示错误 ($code)")
-            return
-        }
-
-        runCatching {
-            val root = JSONObject(jsonStr)
-            val text = root.optJSONObject("result")?.optString("text").orEmpty()
-            if (text.isNotBlank()) {
-                lastRecognizedText = text
-                mainHandler.post { callback.onPartialText(text) }
-            }
-        }.onFailure { e ->
-            XLog.e("DoubaoStreamVoice: 解析响应 JSON 失败", e)
-        }
-    }
-
     private fun parseErrorResponse(data: ByteArray): Pair<Int, String> {
-        if (data.size < 8) return Pair(-1, "未知服务端错误")
         val code = runCatching {
             ByteBuffer.wrap(data, 4, 4).order(ByteOrder.BIG_ENDIAN).int
         }.getOrDefault(-1)
@@ -439,10 +523,9 @@ object DoubaoStreamVoiceEngine {
             }.getOrNull() ?: continue
 
             val jsonStr = runCatching { String(decompressed, Charsets.UTF_8) }.getOrNull() ?: continue
-            val code = runCatching { JSONObject(jsonStr).optInt("code", -1) }.getOrDefault(-1)
-            if (code != -1) {
-                return Pair(code, jsonStr)
-            }
+            val json = runCatching { JSONObject(jsonStr) }.getOrNull() ?: continue
+            val code = if (json.has("code")) json.optInt("code", -1) else 1000
+            return Pair(code, jsonStr)
         }
         return null
     }

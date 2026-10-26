@@ -38,8 +38,8 @@ android {
         applicationId = "com.keyscafe.unlock"
         minSdk = 28
         targetSdk = 34
-        versionCode = 6
-        versionName = "2.7"
+        versionCode = 7
+        versionName = "2.8"
 
         ndk {
             abiFilters.add("arm64-v8a")

@@ -162,14 +162,23 @@ object ConfigStore {
 
     fun filesDir(): File? = stateFile?.parentFile
 
+    @Volatile
+    private var reloadMethod: java.lang.reflect.Method? = null
+
+    @Volatile
+    private var reloadMethodResolved = false
+
     private fun syncPrefsCache() {
         val p = prefs ?: return
         runCatching {
-            val m = p.javaClass.methods.firstOrNull { it.name == "reload" && it.parameterCount == 0 }
-                ?: p.javaClass.declaredMethods.firstOrNull {
-                    it.name == "reload" && it.parameterCount == 0
-                }?.apply { isAccessible = true }
-            m?.invoke(p)
+            if (!reloadMethodResolved) {
+                reloadMethod = p.javaClass.methods.firstOrNull { it.name == "reload" && it.parameterCount == 0 }
+                    ?: p.javaClass.declaredMethods.firstOrNull {
+                        it.name == "reload" && it.parameterCount == 0
+                    }?.apply { isAccessible = true }
+                reloadMethodResolved = true
+            }
+            reloadMethod?.invoke(p)
         }
     }
 

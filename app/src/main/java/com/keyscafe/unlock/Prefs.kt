@@ -54,6 +54,13 @@ object Prefs {
         LM_LONG_PHRASE_AGGRESSIVE to true,
     )
 
+    private const val LOCAL_PREFS_NAME = "xiyu_local_prefs"
+
+    private val localPrefs: android.content.SharedPreferences?
+        get() = runCatching {
+            XyApp.instance.getSharedPreferences(LOCAL_PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        }.getOrNull()
+
     @Volatile
     private var service: XposedService? = null
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
@@ -63,6 +70,7 @@ object Prefs {
             override fun onServiceBind(s: XposedService) {
                 service = s
                 XLog.i("XposedService 绑定成功 apiVersion=${s.apiVersion} fw=${s.frameworkName}")
+                syncLocalToRemote(s)
                 listeners.forEach { runCatching { it() } }
             }
 
@@ -72,6 +80,17 @@ object Prefs {
                 listeners.forEach { runCatching { it() } }
             }
         })
+    }
+
+    private fun syncLocalToRemote(s: XposedService) {
+        val sp = s.getRemotePreferences(GROUP)
+        val lp = localPrefs ?: return
+        val localKey = lp.getString(VOICE_DOUBAO_API_KEY, "")?.trim().orEmpty()
+        val remoteKey = sp.getString(VOICE_DOUBAO_API_KEY, "")?.trim().orEmpty()
+        if (localKey.isNotEmpty() && remoteKey.isEmpty()) {
+            sp.edit().putString(VOICE_DOUBAO_API_KEY, localKey).commit()
+            XLog.i("Prefs: 补偿同步本地 Key 到远程存储")
+        }
     }
 
     fun isActive(): Boolean = service != null
@@ -102,10 +121,21 @@ object Prefs {
         notifyChange(key)
     }
 
-    fun readString(key: String, def: String = ""): String =
-        service?.getRemotePreferences(GROUP)?.getString(key, def) ?: def
+    fun readString(key: String, def: String = ""): String {
+        val remoteVal = service?.getRemotePreferences(GROUP)?.getString(key, "")?.trim().orEmpty()
+        if (remoteVal.isNotEmpty()) {
+            localPrefs?.edit()?.putString(key, remoteVal)?.apply()
+            return remoteVal
+        }
+        val localVal = localPrefs?.getString(key, def)?.trim().orEmpty()
+        if (localVal.isNotEmpty() && service != null) {
+            service?.getRemotePreferences(GROUP)?.edit()?.putString(key, localVal)?.commit()
+        }
+        return localVal.ifEmpty { def }
+    }
 
     fun writeString(key: String, value: String) {
+        localPrefs?.edit()?.putString(key, value)?.commit()
         val sp = service?.getRemotePreferences(GROUP)
         val success = sp?.edit()?.putString(key, value)?.commit() ?: false
         XLog.i("Prefs.writeString key=$key len=${value.length} commit=$success")

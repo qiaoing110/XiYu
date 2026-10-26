@@ -27,6 +27,7 @@ class MainActivity : AppCompatActivity() {
 
     internal lateinit var binding: ActivityMainBinding
     private var programmaticChange = false
+    private var isSyncingDoubaoKey = false
     private var unregisterState: (() -> Unit)? = null
     private var currentSandboxCalc: CalcResult? = null
     internal var lexiconExportReceiver: BroadcastReceiver? = null
@@ -53,6 +54,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 showActivationState()
                 syncSwitches()
+                syncDoubaoVoice()
                 updateLexiconSummaryRow()
                 // 服务绑定后才可能有广播令牌，补拉一次词库快照
                 pullLexiconSnapshotFromRemote()
@@ -64,6 +66,7 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         showActivationState()
         syncSwitches()
+        syncDoubaoVoice()
         pullLexiconSnapshotFromRemote()
     }
 
@@ -399,15 +402,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun initDoubaoVoice() {
         binding.layoutDoubaoParams.visibility = if (Prefs.read(Prefs.VOICE_DOUBAO_ENABLED)) View.VISIBLE else View.GONE
-        val savedKey = Prefs.readString(Prefs.VOICE_DOUBAO_API_KEY).ifBlank {
-            Prefs.readString(Prefs.VOICE_DOUBAO_TOKEN)
-        }
-        binding.editDoubaoApiKey.setText(savedKey)
+        syncDoubaoVoice()
 
         binding.editDoubaoApiKey.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
+                if (isSyncingDoubaoKey) return
                 val text = s?.toString()?.trim().orEmpty()
                 Prefs.writeString(Prefs.VOICE_DOUBAO_API_KEY, text)
             }
@@ -428,6 +429,28 @@ class MainActivity : AppCompatActivity() {
                 binding.textDoubaoTestStatus.setTextColor(
                     getColor(if (success) R.color.xy_status_on_text else R.color.xy_status_off_text)
                 )
+            }
+        }
+    }
+
+    private fun syncDoubaoVoice() {
+        val savedKey = Prefs.readString(Prefs.VOICE_DOUBAO_API_KEY).ifBlank {
+            Prefs.readString(Prefs.VOICE_DOUBAO_TOKEN)
+        }
+        val currentText = binding.editDoubaoApiKey.text?.toString()?.trim().orEmpty()
+        if (savedKey.isNotEmpty() && savedKey != currentText && !binding.editDoubaoApiKey.hasFocus()) {
+            isSyncingDoubaoKey = true
+            try {
+                binding.editDoubaoApiKey.setText(savedKey)
+            } finally {
+                isSyncingDoubaoKey = false
+            }
+        } else if (currentText.isEmpty() && savedKey.isNotEmpty()) {
+            isSyncingDoubaoKey = true
+            try {
+                binding.editDoubaoApiKey.setText(savedKey)
+            } finally {
+                isSyncingDoubaoKey = false
             }
         }
     }

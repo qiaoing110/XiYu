@@ -17,6 +17,11 @@
     <string name="xy_voice_gate_desc">隐藏输入法按钮后仍可长按语音</string>
     <string name="xy_voice_melt_title">语音动画</string>
     <string name="xy_voice_melt_desc">语音时键盘化为水面，随声音起伏</string>
+    <string name="xy_voice_doubao_title">豆包流式语音</string>
+    <string name="xy_voice_doubao_desc">火山引擎 WebSocket 实时边说边出字</string>
+    <string name="xy_voice_doubao_apikey_hint">火山引擎 API Key（新版单密钥）</string>
+    <string name="xy_voice_doubao_test_action">测试连接</string>
+    <string name="xy_voice_doubao_testing">正在测试握手…</string>
 
     <string name="xy_section_otp">验证码</string>
     <string name="xy_section_otp_en">AUTOFILL</string>

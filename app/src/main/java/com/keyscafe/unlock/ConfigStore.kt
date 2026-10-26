@@ -37,6 +37,22 @@ object ConfigStore {
 
     val voiceGate: Boolean get() = snapshot[Prefs.VOICE_GATE] ?: true
     val voiceMelt: Boolean get() = snapshot[Prefs.VOICE_MELT] ?: true
+    val voiceDoubaoEnabled: Boolean get() = snapshot[Prefs.VOICE_DOUBAO_ENABLED] ?: false
+    val voiceDoubaoApiKey: String get() {
+        syncPrefsCache()
+        val k = prefs?.getString(Prefs.VOICE_DOUBAO_API_KEY, "")?.trim().orEmpty()
+        if (k.isNotEmpty()) return k
+        return prefs?.getString(Prefs.VOICE_DOUBAO_TOKEN, "")?.trim().orEmpty()
+    }
+    val voiceDoubaoAppId: String get() {
+        syncPrefsCache()
+        return prefs?.getString(Prefs.VOICE_DOUBAO_APP_ID, "")?.trim().orEmpty()
+    }
+    val voiceDoubaoToken: String get() = prefs?.getString(Prefs.VOICE_DOUBAO_TOKEN, "")?.trim().orEmpty()
+    val voiceDoubaoCluster: String get() {
+        syncPrefsCache()
+        return prefs?.getString(Prefs.VOICE_DOUBAO_CLUSTER, "volc.seedasr.sauc.duration")?.trim().let { if (it.isNullOrBlank()) "volc.seedasr.sauc.duration" else it }
+    }
     val otpEnhance: Boolean get() = snapshot[Prefs.OTP_ENHANCE] ?: true
     val lab: Boolean get() = snapshot[Prefs.LAB] ?: false
     val keysCafeBypass: Boolean get() = snapshot[Prefs.KEYSCAFE_BYPASS] ?: false
@@ -146,8 +162,8 @@ object ConfigStore {
 
     fun filesDir(): File? = stateFile?.parentFile
 
-    fun currentBroadcastToken(): String {
-        val p = prefs ?: return ""
+    private fun syncPrefsCache() {
+        val p = prefs ?: return
         runCatching {
             val m = p.javaClass.methods.firstOrNull { it.name == "reload" && it.parameterCount == 0 }
                 ?: p.javaClass.declaredMethods.firstOrNull {
@@ -155,6 +171,11 @@ object ConfigStore {
                 }?.apply { isAccessible = true }
             m?.invoke(p)
         }
+    }
+
+    fun currentBroadcastToken(): String {
+        val p = prefs ?: return ""
+        syncPrefsCache()
         // 宿主侧是只读偏好，不能在这里 edit()；令牌由 UI 进程写入
         return p.getString(LmCandidateHooks.EXTRA_BROADCAST_TOKEN, "") ?: ""
     }
@@ -183,6 +204,7 @@ object ConfigStore {
 
     fun reload() {
         val p = prefs ?: return
+        syncPrefsCache()
         val next = HashMap(Prefs.DEFAULTS)
         for ((k, d) in Prefs.DEFAULTS) {
             next[k] = p.getBoolean(k, d)

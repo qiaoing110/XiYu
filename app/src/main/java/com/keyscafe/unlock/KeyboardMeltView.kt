@@ -115,16 +115,16 @@ class KeyboardMeltView(context: Context) : View(context) {
 
     fun fadeIn() {
         animate().cancel()
-        alpha = 0f
+        alpha = 0.2f
         lastFrameAt = SystemClock.uptimeMillis()
         running = true
         invalidateAll()
-        animate().alpha(1f).setDuration(220L).start()
+        animate().alpha(1f).setDuration(120L).start()
     }
 
     fun fadeOut(onEnd: () -> Unit) {
         animate().cancel()
-        animate().alpha(0f).setDuration(240L).withEndAction {
+        animate().alpha(0f).setDuration(160L).withEndAction {
             running = false
             alpha = 1f
             onEnd()

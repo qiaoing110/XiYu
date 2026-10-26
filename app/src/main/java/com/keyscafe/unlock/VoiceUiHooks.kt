@@ -32,10 +32,15 @@ object VoiceUiHooks {
 
     private const val FROST_ALPHA = 0.88f
     private const val BLUR_DP = 2f
+    private const val INPUT_CONNECTION_CLASS = "jh.a"
 
     // 状态与视图引用
     @Volatile
     private var listening = false
+
+    @Volatile private var isDoubaoSessionActive = false
+    @Volatile private var isDoubaoCommitting = false
+    @Volatile private var lastComposedText = ""
 
     @Volatile private var service: InputMethodService? = null
     @Volatile private var melt: KeyboardMeltView? = null
@@ -56,6 +61,7 @@ object VoiceUiHooks {
         hookRms(module, classLoader)
         hookService(module, classLoader)
         hookSpace(module, classLoader)
+        hookInputConnection(module, classLoader)
     }
 
     // 1. 麦克风状态
@@ -79,10 +85,18 @@ object VoiceUiHooks {
                         if (now != listening) {
                             listening = now
                             if (now) {
+                                onMain { meltDown() }
                                 startedBySpace = android.os.SystemClock.uptimeMillis() - spacePressedAt < 800L
+                                if (ConfigStore.voiceDoubaoEnabled) {
+                                    startDoubaoStream()
+                                }
+                            } else {
+                                onMain { restore() }
+                                if (ConfigStore.voiceDoubaoEnabled) {
+                                    stopDoubaoStream()
+                                }
                             }
                             XLog.i("聆听状态 -> $state（键盘${if (now) "融化" else "复原"}）")
-                            onMain { if (now) meltDown() else restore() }
                         }
                     }
                     r
@@ -204,6 +218,13 @@ object VoiceUiHooks {
                 Reflect.methodInHierarchy(spaceCls, SPACE_METHOD)?.let { m ->
                     module.hook(m).intercept { chain ->
                         spacePressedAt = android.os.SystemClock.uptimeMillis()
+                        if (inputView == null && service != null) {
+                            onMain {
+                                service?.window?.window?.decorView?.let { decor ->
+                                    if (inputView == null) inputView = findInputView(decor)
+                                }
+                            }
+                        }
                         chain.proceed()
                     }
                 }
@@ -371,11 +392,16 @@ object VoiceUiHooks {
         else android.graphics.Color.argb(a, 0xF5, 0xF6, 0xFA)
     }
 
+    @Volatile private var cachedRootId: Int = -1
+
     // 获取键盘根视图
     private fun findInputView(decor: View): View? {
-        val res = decor.resources
-        val rootId = res.getIdentifier("layout_base_frame_root", "id", KB_PKG)
-        if (rootId != 0) {
+        var rootId = cachedRootId
+        if (rootId == -1) {
+            rootId = decor.resources.getIdentifier("layout_base_frame_root", "id", KB_PKG)
+            cachedRootId = rootId
+        }
+        if (rootId > 0) {
             decor.findViewById<View>(rootId)?.let { return it }
         }
         // 兜底取最高的视图
@@ -386,6 +412,113 @@ object VoiceUiHooks {
             if (best == null || c.height > best.height) best = c
         }
         return best
+    }
+
+    private fun startDoubaoStream() {
+        val apiKey = ConfigStore.voiceDoubaoApiKey
+        val appId = ConfigStore.voiceDoubaoAppId
+        val cluster = ConfigStore.voiceDoubaoCluster
+        if (apiKey.isBlank()) {
+            XLog.e("未配置豆包 API Key，跳过豆包流式识别", null)
+            return
+        }
+
+        isDoubaoSessionActive = true
+        lastComposedText = ""
+
+        DoubaoStreamVoiceEngine.start(apiKey, appId, cluster, object : DoubaoStreamVoiceEngine.StreamCallback {
+            override fun onListeningStarted() {
+                XLog.i("DoubaoStreamVoice: 开始聆听推流")
+            }
+
+            override fun onVolumeChanged(rmsDb: Float) {
+                if (listening) {
+                    melt?.setLevel(rmsDb.toInt())
+                }
+            }
+
+            override fun onPartialText(partialText: String) {
+                if (!isDoubaoSessionActive) return
+                lastComposedText = partialText
+                val ic = service?.currentInputConnection ?: return
+                isDoubaoCommitting = true
+                try {
+                    ic.setComposingText(partialText, 1)
+                } finally {
+                    isDoubaoCommitting = false
+                }
+            }
+
+            override fun onFinalText(finalText: String) {
+                commitFinalText(finalText)
+            }
+
+            override fun onError(errorMsg: String) {
+                XLog.e("DoubaoStreamVoice 报错: $errorMsg", null)
+                val ic = service?.currentInputConnection
+                if (lastComposedText.isNotEmpty()) {
+                    isDoubaoCommitting = true
+                    try {
+                        ic?.finishComposingText()
+                    } finally {
+                        isDoubaoCommitting = false
+                    }
+                }
+                isDoubaoSessionActive = false
+            }
+        })
+    }
+
+    private fun stopDoubaoStream() {
+        if (!isDoubaoSessionActive) return
+        DoubaoStreamVoiceEngine.stop { finalResult ->
+            commitFinalText(finalResult)
+        }
+    }
+
+    private fun commitFinalText(text: String) {
+        val ic = service?.currentInputConnection
+        val commitContent = text.ifBlank { lastComposedText }
+        if (ic != null && commitContent.isNotBlank()) {
+            isDoubaoCommitting = true
+            try {
+                ic.setComposingText(commitContent, 1)
+                ic.finishComposingText()
+                XLog.i("DoubaoStreamVoice: 最终上屏 -> $commitContent")
+            } finally {
+                isDoubaoCommitting = false
+            }
+        } else {
+            ic?.finishComposingText()
+        }
+        mainHandler.postDelayed({
+            isDoubaoSessionActive = false
+        }, 300)
+    }
+
+    private fun hookInputConnection(module: XposedModule, classLoader: ClassLoader) {
+        val icCls = Reflect.findClassIfExists(INPUT_CONNECTION_CLASS, classLoader) ?: return
+        Reflect.method(icCls, "commitText", CharSequence::class.java, java.lang.Integer.TYPE)?.let { m ->
+            XLog.safe("VoiceUiHooks.blockNativeCommit") {
+                module.hook(m).intercept { chain ->
+                    if (isDoubaoSessionActive && !isDoubaoCommitting) {
+                        XLog.i("VoiceUiHooks: 拦截原生语音冲突 commitText -> ${chain.getArg(0)}")
+                        return@intercept true
+                    }
+                    chain.proceed()
+                }
+            }
+        }
+        Reflect.method(icCls, "setComposingText", CharSequence::class.java, java.lang.Integer.TYPE)?.let { m ->
+            XLog.safe("VoiceUiHooks.blockNativeComposing") {
+                module.hook(m).intercept { chain ->
+                    if (isDoubaoSessionActive && !isDoubaoCommitting) {
+                        return@intercept true
+                    }
+                    chain.proceed()
+                }
+            }
+        }
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())

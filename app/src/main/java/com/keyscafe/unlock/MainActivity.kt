@@ -42,6 +42,7 @@ class MainActivity : AppCompatActivity() {
 
         initHeader()
         initSwitches()
+        initDoubaoVoice()
         initAbout()
         initSandbox()
         registerLexiconExportReceiver()
@@ -85,6 +86,9 @@ class MainActivity : AppCompatActivity() {
     private fun initSwitches() {
         bindSwitch(binding.switchVoiceGate, binding.rowVoiceGate, binding.boxVoiceGate, binding.iconVoiceGate, Prefs.VOICE_GATE)
         bindSwitch(binding.switchVoiceMelt, binding.rowVoiceMelt, binding.boxVoiceMelt, binding.iconVoiceMelt, Prefs.VOICE_MELT)
+        bindSwitch(binding.switchVoiceDoubao, binding.rowVoiceDoubao, binding.boxVoiceDoubao, binding.iconVoiceDoubao, Prefs.VOICE_DOUBAO_ENABLED) { enabled ->
+            binding.layoutDoubaoParams.visibility = if (enabled) View.VISIBLE else View.GONE
+        }
         bindSwitch(binding.switchOtpEnhance, binding.rowOtpEnhance, binding.boxOtpEnhance, binding.iconOtpEnhance, Prefs.OTP_ENHANCE)
 
         bindSwitch(binding.switchCalc, binding.rowCalc, binding.boxCalc, binding.iconCalc, Prefs.CALC_ENABLED)
@@ -181,6 +185,9 @@ class MainActivity : AppCompatActivity() {
 
         syncSingleSwitch(binding.switchVoiceGate, binding.boxVoiceGate, binding.iconVoiceGate, Prefs.VOICE_GATE)
         syncSingleSwitch(binding.switchVoiceMelt, binding.boxVoiceMelt, binding.iconVoiceMelt, Prefs.VOICE_MELT)
+        syncSingleSwitch(binding.switchVoiceDoubao, binding.boxVoiceDoubao, binding.iconVoiceDoubao, Prefs.VOICE_DOUBAO_ENABLED)
+        val doubaoEnabled = Prefs.read(Prefs.VOICE_DOUBAO_ENABLED)
+        binding.layoutDoubaoParams.visibility = if (doubaoEnabled) View.VISIBLE else View.GONE
         syncSingleSwitch(binding.switchOtpEnhance, binding.boxOtpEnhance, binding.iconOtpEnhance, Prefs.OTP_ENHANCE)
 
         syncSingleSwitch(binding.switchCalc, binding.boxCalc, binding.iconCalc, Prefs.CALC_ENABLED)
@@ -388,6 +395,41 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton(R.string.xy_lm_clear_dialog_cancel, null)
             .show()
+    }
+
+    private fun initDoubaoVoice() {
+        binding.layoutDoubaoParams.visibility = if (Prefs.read(Prefs.VOICE_DOUBAO_ENABLED)) View.VISIBLE else View.GONE
+        val savedKey = Prefs.readString(Prefs.VOICE_DOUBAO_API_KEY).ifBlank {
+            Prefs.readString(Prefs.VOICE_DOUBAO_TOKEN)
+        }
+        binding.editDoubaoApiKey.setText(savedKey)
+
+        binding.editDoubaoApiKey.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                val text = s?.toString()?.trim().orEmpty()
+                Prefs.writeString(Prefs.VOICE_DOUBAO_API_KEY, text)
+            }
+        })
+
+        binding.btnDoubaoTest.setOnClickListener {
+            val key = binding.editDoubaoApiKey.text?.toString()?.trim().orEmpty()
+            if (key.isBlank()) {
+                binding.textDoubaoTestStatus.text = "请先输入 API Key"
+                binding.textDoubaoTestStatus.setTextColor(getColor(R.color.xy_status_off_text))
+                return@setOnClickListener
+            }
+            binding.textDoubaoTestStatus.text = getString(R.string.xy_voice_doubao_testing)
+            binding.textDoubaoTestStatus.setTextColor(getColor(R.color.xy_subtitle))
+
+            DoubaoStreamVoiceEngine.testConnection(key, cluster = "volc.seedasr.sauc.duration") { success, msg ->
+                binding.textDoubaoTestStatus.text = msg
+                binding.textDoubaoTestStatus.setTextColor(
+                    getColor(if (success) R.color.xy_status_on_text else R.color.xy_status_off_text)
+                )
+            }
+        }
     }
 
     private fun initSandbox() {

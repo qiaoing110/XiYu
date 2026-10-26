@@ -230,6 +230,123 @@
                         android:layout_marginStart="10dp"
                         android:contentDescription="@string/xy_voice_melt_title" />
                 </LinearLayout>
+
+                <View style="@style/XyDivider" />
+
+                <!-- 豆包大模型流式语音 -->
+                <LinearLayout
+                    android:id="@+id/rowVoiceDoubao"
+                    style="@style/XyRow">
+
+                    <FrameLayout
+                        android:id="@+id/boxVoiceDoubao"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:background="@drawable/xy_bg_icon_box">
+
+                        <ImageView
+                            android:id="@+id/iconVoiceDoubao"
+                            android:layout_width="16dp"
+                            android:layout_height="16dp"
+                            android:layout_gravity="center"
+                            android:contentDescription="@null"
+                            android:src="@drawable/ic_xy_voice"
+                            app:tint="@color/xy_icon_tint_off" />
+                    </FrameLayout>
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="11dp"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            style="@style/XyRowTitle"
+                            android:text="@string/xy_voice_doubao_title" />
+
+                        <TextView
+                            style="@style/XyRowSubtitle"
+                            android:text="@string/xy_voice_doubao_desc" />
+                    </LinearLayout>
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switchVoiceDoubao"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
+                        android:contentDescription="@string/xy_voice_doubao_title" />
+                </LinearLayout>
+
+                <!-- 豆包参数配置抽屉 -->
+                <LinearLayout
+                    android:id="@+id/layoutDoubaoParams"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:paddingBottom="12dp"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="@string/xy_voice_doubao_apikey_hint"
+                        android:textColor="@color/xy_subtitle"
+                        android:textSize="11.5sp" />
+
+                    <EditText
+                        android:id="@+id/editDoubaoApiKey"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:background="@drawable/xy_bg_tray"
+                        android:fontFamily="monospace"
+                        android:hint="粘贴控制台生成的 API Key"
+                        android:inputType="textPassword"
+                        android:maxLines="1"
+                        android:paddingStart="10dp"
+                        android:paddingEnd="10dp"
+                        android:paddingTop="7dp"
+                        android:paddingBottom="7dp"
+                        android:textColor="@color/xy_title"
+                        android:textColorHint="@color/xy_section_en"
+                        android:textSize="12.5sp" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/btnDoubaoTest"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:background="@drawable/xy_bg_code_badge"
+                            android:fontFamily="monospace"
+                            android:paddingStart="12dp"
+                            android:paddingEnd="12dp"
+                            android:paddingTop="5dp"
+                            android:paddingBottom="5dp"
+                            android:text="@string/xy_voice_doubao_test_action"
+                            android:textColor="@color/xy_badge_text"
+                            android:textSize="11.5sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/textDoubaoTestStatus"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="10dp"
+                            android:layout_weight="1"
+                            android:textColor="@color/xy_subtitle"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+                </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

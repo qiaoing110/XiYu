@@ -13,6 +13,11 @@ object Prefs {
 
     const val VOICE_GATE = "voice_gate"
     const val VOICE_MELT = "voice_melt"
+    const val VOICE_DOUBAO_ENABLED = "voice_doubao_enabled"
+    const val VOICE_DOUBAO_API_KEY = "voice_doubao_api_key"
+    const val VOICE_DOUBAO_APP_ID = "voice_doubao_app_id"
+    const val VOICE_DOUBAO_TOKEN = "voice_doubao_token"
+    const val VOICE_DOUBAO_CLUSTER = "voice_doubao_cluster"
     const val OTP_ENHANCE = "otp_enhance"
     const val LAB = "lab"
     const val KEYSCAFE_BYPASS = "keyscafe_bypass"
@@ -33,6 +38,7 @@ object Prefs {
     val DEFAULTS: Map<String, Boolean> = mapOf(
         VOICE_GATE to true,
         VOICE_MELT to true,
+        VOICE_DOUBAO_ENABLED to false,
         OTP_ENHANCE to true,
         LAB to false,
         KEYSCAFE_BYPASS to false,

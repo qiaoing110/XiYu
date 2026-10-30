@@ -21,6 +21,7 @@ object Prefs {
     const val OTP_ENHANCE = "otp_enhance"
     const val LAB = "lab"
     const val KEYSCAFE_BYPASS = "keyscafe_bypass"
+    const val CN_WALLET = "cn_wallet"
     const val CALC_ENABLED = "calc_enabled"
     const val CALC_REPLACE_EXPR = "calc_replace_expr"
     const val CALC_RMB = "calc_rmb"
@@ -42,6 +43,7 @@ object Prefs {
         OTP_ENHANCE to true,
         LAB to false,
         KEYSCAFE_BYPASS to false,
+        CN_WALLET to true,
         CALC_ENABLED to true,
         CALC_REPLACE_EXPR to true,
         CALC_RMB to true,

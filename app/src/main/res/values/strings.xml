@@ -145,6 +145,10 @@
     <string name="xy_section_lab_en">LABS</string>
     <string name="xy_lab_title">三星键盘实验室</string>
     <string name="xy_lab_desc">实验功能与调试开关，可能影响稳定性</string>
+    <string name="xy_section_wallet">国行钱包</string>
+    <string name="xy_section_wallet_en">WALLET</string>
+    <string name="xy_wallet_title">国行三星钱包</string>
+    <string name="xy_wallet_desc">伪装为国行环境，切换需重启钱包</string>
 
     <!-- 沙盒测试 -->
     <string name="xy_section_sandbox">效果体验沙盒</string>
@@ -217,5 +221,8 @@
         <item>com.samsung.android.keyscafe</item>
         <item>com.samsung.android.smartsuggestions</item>
         <item>com.keyscafe.unlock</item>
+        <item>com.samsung.android.spay</item>
+        <item>com.samsung.android.spayfw</item>
+        <item>com.unionpay.tsmservice</item>
     </string-array>
 </resources>

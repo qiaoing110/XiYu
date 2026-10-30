@@ -1580,6 +1580,62 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
+        <!-- 国行钱包分组 (WALLET) -->
+        <LinearLayout style="@style/XySectionHeader">
+            <TextView
+                style="@style/XySectionTitle"
+                android:text="@string/xy_section_wallet" />
+            <TextView
+                style="@style/XySectionEn"
+                android:text="@string/xy_section_wallet_en" />
+        </LinearLayout>
+
+        <com.google.android.material.card.MaterialCardView style="@style/XyCard">
+            <LinearLayout
+                android:id="@+id/rowCnWallet"
+                style="@style/XyRow">
+
+                <FrameLayout
+                    android:id="@+id/boxCnWallet"
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:background="@drawable/xy_bg_icon_box">
+
+                    <ImageView
+                        android:id="@+id/iconCnWallet"
+                        android:layout_width="16dp"
+                        android:layout_height="16dp"
+                        android:layout_gravity="center"
+                        android:contentDescription="@null"
+                        android:src="@drawable/ic_xy_shield"
+                        app:tint="@color/xy_icon_tint_off" />
+                </FrameLayout>
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="11dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/XyRowTitle"
+                        android:text="@string/xy_wallet_title" />
+
+                    <TextView
+                        style="@style/XyRowSubtitle"
+                        android:text="@string/xy_wallet_desc" />
+                </LinearLayout>
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchCnWallet"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:contentDescription="@string/xy_wallet_title" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
         <!-- 7. 实验功能分组 (LABS) -->
         <LinearLayout style="@style/XySectionHeader">
             <TextView

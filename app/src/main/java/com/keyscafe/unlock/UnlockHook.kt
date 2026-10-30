@@ -34,6 +34,7 @@ class UnlockHook : XposedModule() {
                 ConfigStore.init(this)
                 KeysCafeHooks.install(this, cl)
             }
+            pkg in WalletHooks.TARGET_PACKAGES -> WalletHooks.install(this, cl)
             pkg == XyCore.get(21) -> {
                 XLog.i("注入三星智能建议服务")
                 ConfigStore.init(this)

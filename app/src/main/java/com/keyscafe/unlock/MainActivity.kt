@@ -136,6 +136,7 @@ class MainActivity : AppCompatActivity() {
 
         bindSwitch(binding.switchKeysCafe, binding.rowKeysCafe, binding.boxKeysCafe, binding.iconKeysCafe, Prefs.KEYSCAFE_BYPASS)
         bindSwitch(binding.switchLab, binding.rowLab, binding.boxLab, binding.iconLab, Prefs.LAB)
+        bindSwitch(binding.switchCnWallet, binding.rowCnWallet, binding.boxCnWallet, binding.iconCnWallet, Prefs.CN_WALLET)
 
         updateDictEngineStatus()
         updateLexiconSummaryRow()
@@ -211,6 +212,7 @@ class MainActivity : AppCompatActivity() {
 
         syncSingleSwitch(binding.switchKeysCafe, binding.boxKeysCafe, binding.iconKeysCafe, Prefs.KEYSCAFE_BYPASS)
         syncSingleSwitch(binding.switchLab, binding.boxLab, binding.iconLab, Prefs.LAB)
+        syncSingleSwitch(binding.switchCnWallet, binding.boxCnWallet, binding.iconCnWallet, Prefs.CN_WALLET)
         updateDictEngineStatus()
 
         programmaticChange = false

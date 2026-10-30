@@ -1,7 +1,7 @@
 # 汐语 (Xiyu)
 
 <p align="center">
-  <strong>基于 LSPosed (libxposed API 100+) 的三星键盘与 Keys Cafe 增强模块</strong>
+  <strong>基于 LSPosed (libxposed API 100+) 的三星键盘、Keys Cafe 与三星钱包增强模块</strong>
 </p>
 
 <p align="center">
@@ -53,6 +53,12 @@
 ### 7. 三星键盘隐藏开发者选项
 - 直接开启三星键盘内置的 Developer Options 调试面板，方便查看按键落点、防误触边界与内部状态。
 
+### 8. 国行三星钱包与交通卡免改分区支持
+- **系统属性运行时伪装**：针对三星钱包（Samsung Wallet）、支付框架（Samsung Pay Framework）及银联 TSM 服务，定向伪装 CSC / Sales Code 为国行 `CHC` 环境。
+- **免改分区**：针对港版、台版等 One UI 设备，无需刷入国行 CSC 固件、无需修改 prism / optics 系统分区即可解除地域封锁。
+- **全功能可用**：完整支持国行交通卡（全国交通联合卡/城市交通卡等）开卡、充值、刷卡进出站与 NFC 息屏刷卡。
+- **独立开关**：模块主界面提供独立开关，支持随时切换启用。
+
 ---
 
 ## 技术架构
@@ -78,7 +84,10 @@
    - `com.samsung.android.honeyboard`（三星键盘）
    - `com.samsung.android.keyscafe`（Keys Cafe，使用自定义布局功能时勾选）
    - `com.samsung.android.smartsuggestions`（系统智能建议，使用验证码提取时勾选）
-4. 重启三星键盘生效。
+   - `com.samsung.android.spay`（三星钱包，使用国行钱包伪装时勾选）
+   - `com.samsung.android.spayfw`（三星支付框架，使用国行钱包伪装时勾选）
+   - `com.unionpay.tsmservice`（银联可信服务，使用交通卡时勾选）
+4. 重启对应应用生效。
 
 ---
 
